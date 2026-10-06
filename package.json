@@ -1,13 +1,14 @@
 {
   "name": "whatsapp-notification-service",
   "version": "1.0.0",
-  "description": "Internal WhatsApp notification service — HTTP API to send WhatsApp messages",
+  "description": "Internal WhatsApp notification service \u2014 HTTP API to send WhatsApp messages",
   "main": "dist/index.js",
   "scripts": {
     "dev": "ts-node src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "node --test -r ts-node/register test/*.test.ts"
   },
   "license": "ISC",
   "dependencies": {
