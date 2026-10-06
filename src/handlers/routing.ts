@@ -6,7 +6,6 @@ export interface RouteInput {
   addressedToBot: boolean;
   agentGroups: string[];
   agentConfigured: boolean;
-  aiEnabled: boolean;
 }
 
 // Decide who handles a group message: pm-agent, the built-in AI, or nobody.
@@ -18,9 +17,7 @@ export function routeMessage(input: RouteInput): Route {
     return input.agentConfigured ? 'forward' : 'skip';
   }
 
-  if (!input.addressedToBot) return 'skip';
-  if (input.aiEnabled) return 'ai';
-  return input.agentConfigured ? 'forward' : 'skip';
+  return input.addressedToBot ? 'ai' : 'skip';
 }
 
 export function parseGroupList(raw: string | undefined): string[] {

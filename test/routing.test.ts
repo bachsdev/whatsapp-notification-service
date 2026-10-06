@@ -12,7 +12,6 @@ function input(overrides: Partial<RouteInput>): RouteInput {
     addressedToBot: false,
     agentGroups: [COMPLIANCE],
     agentConfigured: true,
-    aiEnabled: true,
     ...overrides
   };
 }
@@ -38,14 +37,6 @@ test('other groups keep the AI reply when the bot is tagged', () => {
 
 test('other groups ignore messages that do not address the bot', () => {
   assert.equal(routeMessage(input({ addressedToBot: false })), 'skip');
-});
-
-test('with the AI turned off, a tag in another group goes to pm-agent', () => {
-  assert.equal(routeMessage(input({ addressedToBot: true, aiEnabled: false })), 'forward');
-  assert.equal(
-    routeMessage(input({ addressedToBot: true, aiEnabled: false, agentConfigured: false })),
-    'skip'
-  );
 });
 
 test('the group list is comma separated and ignores blanks', () => {

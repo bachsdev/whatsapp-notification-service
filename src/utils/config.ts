@@ -15,9 +15,7 @@ export const config = {
   agentWebhookKey: process.env.AGENT_WEBHOOK_KEY || '',
   // Groups pm-agent owns, comma separated. Every message there goes to pm-agent,
   // and the built-in AI never replies there.
-  agentGroups: parseGroupList(process.env.AGENT_GROUPS),
-  // Set to "false" to stop the built-in AI replying anywhere.
-  aiRepliesEnabled: (process.env.LADY_BACHS_ENABLED ?? 'true').toLowerCase() !== 'false'
+  agentGroups: parseGroupList(process.env.AGENT_GROUPS)
 };
 
 if (!config.apiKey) {

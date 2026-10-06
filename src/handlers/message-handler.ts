@@ -153,8 +153,7 @@ export class MessageHandler {
       groupJid: jid,
       addressedToBot: isMentioned || isQuoteReply,
       agentGroups: config.agentGroups,
-      agentConfigured: Boolean(config.agentWebhookUrl && config.agentWebhookKey),
-      aiEnabled: config.aiRepliesEnabled
+      agentConfigured: Boolean(config.agentWebhookUrl && config.agentWebhookKey)
     });
 
     if (route === 'skip') {
