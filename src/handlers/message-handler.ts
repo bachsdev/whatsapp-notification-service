@@ -1,7 +1,10 @@
 import { WASocket, proto } from '@whiskeysockets/baileys';
 import { generateReply } from '../ai/ai';
 import { registerContact, resolveNameByNumber } from '../ai/contacts';
+import { forwardToAgent } from '../agent/forwarder';
+import { config } from '../utils/config';
 import { logger } from '../utils/logger';
+import { routeMessage } from './routing';
 
 // Unwrap all the common message wrapper layers and return the inner IMessage
 function unwrapMessage(msg: proto.IWebMessageInfo): proto.IMessage | null {
@@ -64,6 +67,16 @@ function extractNameFromIntroduction(
   }
 
   return results;
+}
+
+function extractContextInfo(m: proto.IMessage): proto.IContextInfo | null {
+  return (
+    m.extendedTextMessage?.contextInfo ??
+    m.imageMessage?.contextInfo ??
+    m.videoMessage?.contextInfo ??
+    m.documentMessage?.contextInfo ??
+    null
+  );
 }
 
 // Extract mentioned JIDs from any context layer
@@ -131,13 +144,41 @@ export class MessageHandler {
       return numericId + '@s.whatsapp.net' === botNumber;
     });
 
-    // Also trigger if the user quoted one of the bot's own messages
-    const quotedParticipant = inner.extendedTextMessage?.contextInfo?.participant ?? '';
+    const contextInfo = extractContextInfo(inner);
+    const quotedParticipant = contextInfo?.participant ?? '';
     const quotedId = quotedParticipant.split('@')[0].split(':')[0];
-    const isQuoteReply = quotedId === botLidNumber || quotedParticipant === botNumber;
+    const isQuoteReply = quotedParticipant !== '' && (quotedId === botLidNumber || quotedParticipant === botNumber);
 
-    if (!isMentioned && !isQuoteReply) {
-      logger.debug({ jid }, 'Skipping — bot not mentioned or quoted');
+    const route = routeMessage({
+      groupJid: jid,
+      addressedToBot: isMentioned || isQuoteReply,
+      agentGroups: config.agentGroups,
+      agentConfigured: Boolean(config.agentWebhookUrl && config.agentWebhookKey),
+      aiEnabled: config.aiRepliesEnabled
+    });
+
+    if (route === 'skip') {
+      logger.debug({ jid, isMentioned, isQuoteReply }, 'Skipping — not for the AI or pm-agent');
+      return;
+    }
+
+    const senderJid = msg.key.participant ?? '';
+
+    if (route === 'forward') {
+      const quotedText = contextInfo?.quotedMessage ? extractText(contextInfo.quotedMessage) : '';
+      const quotedSender = isQuoteReply
+        ? 'Lady Bachs'
+        : resolveNameByNumber(quotedId) ?? undefined;
+      await forwardToAgent(config.agentWebhookUrl, config.agentWebhookKey, {
+        message_id: msg.key.id ?? '',
+        thread_key: jid,
+        sender_id: senderJid,
+        sender_name: msg.pushName ?? undefined,
+        text,
+        quoted_text: quotedText || undefined,
+        quoted_sender: quotedText ? quotedSender : undefined,
+        timestamp: Number(msg.messageTimestamp ?? Math.floor(Date.now() / 1000))
+      });
       return;
     }
 
@@ -148,7 +189,6 @@ export class MessageHandler {
     }).trim();
     if (!cleanText) return;
 
-    const senderJid = msg.key.participant ?? '';
     logger.info({ group: jid, sender: senderJid, text: cleanText }, 'Mention received');
 
     // Auto-register sender
