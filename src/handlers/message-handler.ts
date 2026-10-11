@@ -1,7 +1,8 @@
-import { WASocket, proto } from '@whiskeysockets/baileys';
+import { WAMessage, WASocket, downloadMediaMessage, proto } from '@whiskeysockets/baileys';
 import { generateReply } from '../ai/ai';
 import { registerContact, resolveNameByNumber } from '../ai/contacts';
 import { forwardToAgent } from '../agent/forwarder';
+import { AgentMediaFields, loadMedia, pickMedia, unwrapContent } from '../agent/media';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
 import { routeMessage } from './routing';
@@ -85,6 +86,7 @@ function extractMentions(m: proto.IMessage): string[] {
     m.extendedTextMessage?.contextInfo?.mentionedJid ??
     m.imageMessage?.contextInfo?.mentionedJid ??
     m.videoMessage?.contextInfo?.mentionedJid ??
+    m.documentMessage?.contextInfo?.mentionedJid ??
     []
   );
 }
@@ -101,6 +103,37 @@ export class MessageHandler {
       // LID is stored as sock.user.lid on newer WhatsApp multi-device accounts
       this.botLid = (sock.user as any).lid ?? '';
     }
+  }
+
+  // The file to send pm-agent with this message: its own image/document, or, when someone
+  // replies to a screenshot and tags Lady Bachs, the one in the quoted message.
+  private async mediaFor(
+    msg: proto.IWebMessageInfo,
+    inner: proto.IMessage,
+    contextInfo: proto.IContextInfo | null,
+    isMentioned: boolean
+  ): Promise<AgentMediaFields | null> {
+    const own = pickMedia(inner);
+    if (own) {
+      return loadMedia(own, () => this.download({ key: msg.key!, message: inner } as WAMessage));
+    }
+    const quoted = unwrapContent(contextInfo?.quotedMessage);
+    const fromQuote = isMentioned ? pickMedia(quoted) : null;
+    if (!fromQuote || !quoted || !contextInfo?.stanzaId) return null;
+    const key: proto.IMessageKey = {
+      remoteJid: msg.key?.remoteJid,
+      id: contextInfo.stanzaId,
+      participant: contextInfo.participant,
+      fromMe: false
+    };
+    return loadMedia(fromQuote, () => this.download({ key, message: quoted } as WAMessage));
+  }
+
+  private async download(message: WAMessage): Promise<Buffer> {
+    return downloadMediaMessage(message, 'buffer', {}, {
+      logger,
+      reuploadRequest: this.sock.updateMediaMessage
+    });
   }
 
   async handleMessage(msg: proto.IWebMessageInfo): Promise<void> {
@@ -128,8 +161,10 @@ export class MessageHandler {
     const text = extractText(inner);
     logger.debug({ jid, text }, 'Extracted text');
 
-    if (!text) {
-      logger.debug({ jid }, 'Skipping — no text found');
+    // A screenshot with no caption still matters to pm-agent; the built-in AI needs words.
+    const ownMedia = pickMedia(inner);
+    if (!text && !ownMedia) {
+      logger.debug({ jid }, 'Skipping — no text or file found');
       return;
     }
 
@@ -164,10 +199,12 @@ export class MessageHandler {
     const senderJid = msg.key.participant ?? '';
 
     if (route === 'forward') {
-      const quotedText = contextInfo?.quotedMessage ? extractText(contextInfo.quotedMessage) : '';
+      const quotedInner = unwrapContent(contextInfo?.quotedMessage);
+      const quotedText = quotedInner ? extractText(quotedInner) : '';
       const quotedSender = isQuoteReply
         ? 'Lady Bachs'
         : resolveNameByNumber(quotedId) ?? undefined;
+      const media = await this.mediaFor(msg, inner, contextInfo, isMentioned);
       await forwardToAgent(config.agentWebhookUrl, config.agentWebhookKey, {
         message_id: msg.key.id ?? '',
         thread_key: jid,
@@ -176,10 +213,13 @@ export class MessageHandler {
         text,
         quoted_text: quotedText || undefined,
         quoted_sender: quotedText ? quotedSender : undefined,
-        timestamp: Number(msg.messageTimestamp ?? Math.floor(Date.now() / 1000))
+        timestamp: Number(msg.messageTimestamp ?? Math.floor(Date.now() / 1000)),
+        ...(media ?? {})
       });
       return;
     }
+
+    if (!text) return; // the built-in AI only answers words
 
     // Replace @number mentions with resolved names so AI has full context
     const cleanText = text.replace(/@(\d+)/g, (_, num) => {

@@ -1,7 +1,9 @@
 import { logger } from '../utils/logger';
+import { AgentMediaFields } from './media';
 
-// The body pm-agent's /webhook reads (bachs-agent interface/bachs_notify.py).
-export interface AgentInboundPayload {
+// The body pm-agent's /webhook reads (bachs-agent interface/bachs_notify.py). A screenshot
+// or file rides along as base64 in the optional media fields.
+export interface AgentInboundPayload extends Partial<AgentMediaFields> {
   message_id: string;
   thread_key: string;
   sender_id: string;
