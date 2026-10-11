@@ -11,6 +11,13 @@ export interface AgentInboundPayload extends Partial<AgentMediaFields> {
   text: string;
   quoted_text?: string;
   quoted_sender?: string;
+  // Lady Bachs is @tagged (by phone JID or LID).
+  mentioned: boolean;
+  // The message quotes one of Lady Bachs' own messages, tagged or not.
+  reply_to_bot: boolean;
+  // mentioned || reply_to_bot: she was spoken to. Anything else in her groups is ambient,
+  // and pm-agent only observes it.
+  addressed: boolean;
   timestamp: number;
 }
 

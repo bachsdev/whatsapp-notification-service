@@ -5,20 +5,12 @@ import { forwardToAgent } from '../agent/forwarder';
 import { AgentMediaFields, loadMedia, pickMedia, unwrapContent } from '../agent/media';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
+import { addressingOf, BotIds, findContextInfo, isBotJid, userPart } from './addressing';
 import { routeMessage } from './routing';
 
 // Unwrap all the common message wrapper layers and return the inner IMessage
 function unwrapMessage(msg: proto.IWebMessageInfo): proto.IMessage | null {
-  const m = msg.message;
-  if (!m) return null;
-
-  return (
-    m.ephemeralMessage?.message ??
-    m.viewOnceMessage?.message ??
-    m.viewOnceMessageV2?.message?.viewOnceMessage?.message ??
-    m.documentWithCaptionMessage?.message ??
-    m
-  );
+  return unwrapContent(msg.message);
 }
 
 // Extract plain text from any message type that carries text
@@ -70,66 +62,58 @@ function extractNameFromIntroduction(
   return results;
 }
 
-function extractContextInfo(m: proto.IMessage): proto.IContextInfo | null {
-  return (
-    m.extendedTextMessage?.contextInfo ??
-    m.imageMessage?.contextInfo ??
-    m.videoMessage?.contextInfo ??
-    m.documentMessage?.contextInfo ??
-    null
-  );
-}
-
 // Extract mentioned JIDs from any context layer
 function extractMentions(m: proto.IMessage): string[] {
-  return (
-    m.extendedTextMessage?.contextInfo?.mentionedJid ??
-    m.imageMessage?.contextInfo?.mentionedJid ??
-    m.videoMessage?.contextInfo?.mentionedJid ??
-    m.documentMessage?.contextInfo?.mentionedJid ??
-    []
-  );
+  return findContextInfo(m)?.mentionedJid ?? [];
 }
 
 export class MessageHandler {
   private sock: WASocket;
-  private botJid: string = '';
-  private botLid: string = '';
+  private downloader?: (message: WAMessage) => Promise<Buffer>;
 
-  constructor(sock: WASocket) {
+  // `downloader` replaces the WhatsApp media download (tests).
+  constructor(sock: WASocket, downloader?: (message: WAMessage) => Promise<Buffer>) {
     this.sock = sock;
-    if (sock.user) {
-      this.botJid = sock.user.id;
-      // LID is stored as sock.user.lid on newer WhatsApp multi-device accounts
-      this.botLid = (sock.user as any).lid ?? '';
-    }
+    this.downloader = downloader;
+  }
+
+  // Read on every message: the LID can arrive after the socket opens.
+  private botIds(): BotIds {
+    const me = this.sock.user ?? this.sock.authState?.creds?.me;
+    return {
+      jid: me?.id ?? '',
+      lid: me?.lid ?? this.sock.authState?.creds?.me?.lid ?? ''
+    };
   }
 
   // The file to send pm-agent with this message: its own image/document, or, when someone
-  // replies to a screenshot and tags Lady Bachs, the one in the quoted message.
+  // replies to a screenshot and tags Lady Bachs (or replies to one of hers), the one in
+  // the quoted message.
   private async mediaFor(
     msg: proto.IWebMessageInfo,
     inner: proto.IMessage,
     contextInfo: proto.IContextInfo | null,
-    isMentioned: boolean
+    addressed: boolean,
+    bot: BotIds
   ): Promise<AgentMediaFields | null> {
     const own = pickMedia(inner);
     if (own) {
       return loadMedia(own, () => this.download({ key: msg.key!, message: inner } as WAMessage));
     }
     const quoted = unwrapContent(contextInfo?.quotedMessage);
-    const fromQuote = isMentioned ? pickMedia(quoted) : null;
+    const fromQuote = addressed ? pickMedia(quoted) : null;
     if (!fromQuote || !quoted || !contextInfo?.stanzaId) return null;
     const key: proto.IMessageKey = {
       remoteJid: msg.key?.remoteJid,
       id: contextInfo.stanzaId,
       participant: contextInfo.participant,
-      fromMe: false
+      fromMe: isBotJid(contextInfo.participant, bot)
     };
     return loadMedia(fromQuote, () => this.download({ key, message: quoted } as WAMessage));
   }
 
   private async download(message: WAMessage): Promise<Buffer> {
+    if (this.downloader) return this.downloader(message);
     return downloadMediaMessage(message, 'buffer', {}, {
       logger,
       reuploadRequest: this.sock.updateMediaMessage
@@ -169,24 +153,16 @@ export class MessageHandler {
     }
 
     const mentionedJids = extractMentions(inner);
-    const botNumber = this.botJid.split(':')[0] + '@s.whatsapp.net';
-    const botLidNumber = this.botLid ? this.botLid.split('@')[0].split(':')[0] : '';
-    logger.debug({ botJid: this.botJid, botLid: this.botLid, botNumber, botLidNumber, mentionedJids }, 'Checking mention');
-
-    const isMentioned = mentionedJids.some((m) => {
-      const numericId = m.split('@')[0].split(':')[0];
-      if (m.endsWith('@lid')) return numericId === botLidNumber;
-      return numericId + '@s.whatsapp.net' === botNumber;
-    });
-
-    const contextInfo = extractContextInfo(inner);
-    const quotedParticipant = contextInfo?.participant ?? '';
-    const quotedId = quotedParticipant.split('@')[0].split(':')[0];
-    const isQuoteReply = quotedParticipant !== '' && (quotedId === botLidNumber || quotedParticipant === botNumber);
+    const bot = this.botIds();
+    const contextInfo = findContextInfo(inner);
+    const { mentioned: isMentioned, replyToBot: isQuoteReply } = addressingOf(text, contextInfo, bot);
+    const addressedToBot = isMentioned || isQuoteReply;
+    const quotedId = userPart(contextInfo?.participant);
+    logger.debug({ bot, mentionedJids, quoted: contextInfo?.participant, isMentioned, isQuoteReply }, 'Checking mention');
 
     const route = routeMessage({
       groupJid: jid,
-      addressedToBot: isMentioned || isQuoteReply,
+      addressedToBot,
       agentGroups: config.agentGroups,
       agentConfigured: Boolean(config.agentWebhookUrl && config.agentWebhookKey)
     });
@@ -204,7 +180,7 @@ export class MessageHandler {
       const quotedSender = isQuoteReply
         ? 'Lady Bachs'
         : resolveNameByNumber(quotedId) ?? undefined;
-      const media = await this.mediaFor(msg, inner, contextInfo, isMentioned);
+      const media = await this.mediaFor(msg, inner, contextInfo, addressedToBot, bot);
       await forwardToAgent(config.agentWebhookUrl, config.agentWebhookKey, {
         message_id: msg.key.id ?? '',
         thread_key: jid,
@@ -213,6 +189,9 @@ export class MessageHandler {
         text,
         quoted_text: quotedText || undefined,
         quoted_sender: quotedText ? quotedSender : undefined,
+        mentioned: isMentioned,
+        reply_to_bot: isQuoteReply,
+        addressed: addressedToBot,
         timestamp: Number(msg.messageTimestamp ?? Math.floor(Date.now() / 1000)),
         ...(media ?? {})
       });
