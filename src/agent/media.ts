@@ -19,16 +19,21 @@ export interface MediaSource {
   size: number; // declared by WhatsApp; 0 when unknown
 }
 
-// Unwrap the layers a quoted message can sit in (a document with a caption, view once).
+// Unwrap the layers a message can sit in (disappearing, view once, a document with a
+// caption), however deeply they nest.
 export function unwrapContent(m: proto.IMessage | null | undefined): proto.IMessage | null {
-  if (!m) return null;
-  return (
-    m.ephemeralMessage?.message ??
-    m.viewOnceMessage?.message ??
-    m.viewOnceMessageV2?.message ??
-    m.documentWithCaptionMessage?.message ??
-    m
-  );
+  let cur: proto.IMessage | null = m ?? null;
+  for (let i = 0; cur && i < 5; i++) {
+    const next =
+      cur.ephemeralMessage?.message ??
+      cur.viewOnceMessage?.message ??
+      cur.viewOnceMessageV2?.message ??
+      cur.viewOnceMessageV2Extension?.message ??
+      cur.documentWithCaptionMessage?.message;
+    if (!next) break;
+    cur = next;
+  }
+  return cur;
 }
 
 // The file a message carries, if it is one pm-agent can use (an image or a document).
